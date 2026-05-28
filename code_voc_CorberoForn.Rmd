@@ -1,0 +1,1087 @@
+---
+title: "Ona_voc_code"
+author: "Ona Corberó Forn"
+date: "2026-05-28"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(vegan)
+library(tidyverse)
+library(plotly)
+library(tibble)
+library(viridis)
+library(ggridges)
+library(forcats) 
+library(randomForest)
+library(caTools)
+library(rfPermute)
+library(caret)
+library(ggsignif)
+library(ggpubr)
+```
+
+## VOCs Analysis from the Black Rhino Dung
+
+Charge the necessary packages and set up the common used paths to the working directory 
+
+```{r}
+
+wd <- list()
+wd$data   <- "D:/ona/biology/Master Biologie/2nd year/Rhino Project/Corbero_Ona_thesis/datasets/"
+wd$output <- "D:/ona/biology/Master Biologie/2nd year/Rhino Project/Corbero_Ona_thesis/"
+
+```
+
+Filter the petrol molecules and calibrate the VOCs dataset with the IS: 
+
+```{r}
+vocs <- read.csv(paste0(wd$data, "ona_vocs.csv"))
+
+vocs$row.retention.time <- round(vocs$row.retention.time , digits = 3) # retention time row with  3 digits
+vocs2 <- vocs %>% select(-c(1,2))   %>%  column_to_rownames(var = "row.retention.time") %>%  t #remove first two columns and transpose
+
+rownames(vocs2)<- rownames(vocs2) %>% str_replace(".CDF.Peak.area*", "") #replace .Peak.area
+
+###fill missing values for IS
+which(vocs2[,60] ==0) 
+vocs2 <- as.data.frame(vocs2)
+names(vocs2)[60] <- c("IS")
+
+vocs3 <- vocs2%>% mutate(IS = ifelse(IS == 0, mean(IS[IS != 0]), IS)) #callibrate with IS 
+vocs3$IS
+
+vocs4 <- vocs3/vocs3$IS * 2
+vocs5 <- vocs4[,-60] #new database without naphtalene 
+
+rownames(vocs5) # Identify the columns where 'Dichloro.CDF Peak area' row has a value greater than 0
+vocs5["imp", ] <- vocs5["Dichloro", ] + vocs5["DichloNa", ] + vocs5["Test", ]
+
+columns_to_keep <- which(vocs5["imp", ] == 0)
+
+vocs5_filtered <- vocs5[, columns_to_keep] # Subset the data frame to keep only those columns
+
+vocs5_filtered2 <- vocs5_filtered %>% filter(!(rownames(vocs5_filtered) %in% c("imp", "Dichloro", "DichloNa", "Test")))
+
+```
+
+Calibrate with sample dry weight (dw) and merge with the dataset: 
+
+```{r}
+metadata<-read.csv(paste0(wd$data,  "ona_metadata_vocs.csv"), h=T,  sep=";",  na.strings = "NA", stringsAsFactors=FALSE)
+
+metadata$rhino <- as.factor(metadata$rhino)
+metadata$sample_type <- as.factor(metadata$sample_type)
+metadata$rhino_sex <- as.factor(metadata$rhino_sex)
+metadata$rhino_origin <- as.factor(metadata$rhino_origin)
+metadata$day_exp <- as.factor(metadata$day_exp)
+metadata$dung_rhino <- as.factor(metadata$dung_rhino)
+metadata$dung_sex <- as.factor(metadata$dung_sex)
+metadata$dung_origin <- as.factor(metadata$dung_origin)
+metadata$date2 <- as.Date(metadata$date2, format = "%d/%m/%Y")
+
+metadata2 <- metadata %>%  column_to_rownames(var = "filename")
+
+#callibrating dw 
+
+dw_values <- metadata2[rownames(vocs5_filtered2), "dw"]
+dw_values <- as.numeric(dw_values)
+vocs5_calibrated <- vocs5_filtered2/dw_values*100
+
+# adding names to the compounds !!!!
+
+compound_names<-read.csv(paste0(wd$data,  "names_voc_compounds.csv"), h=T,  sep=";",  na.strings = "NA", stringsAsFactors=FALSE)
+
+vocs_names <- vocs5_calibrated %>%
+  tibble::rownames_to_column("Sample") %>%
+  pivot_longer(-Sample,   names_to = "Retention_time",
+    values_to = "Composition") %>%
+  mutate(Retention_time = as.numeric(Retention_time)) %>%
+  left_join(compound_names, by = "Retention_time") %>%
+ 
+  filter(!is.na(Compound_Name)) %>%  # Keep only retention times with a compound name
+  
+  # sum compositions for the same compound (per sample)
+  group_by(Sample, Compound_Name) %>%
+  summarise( Composition = sum(Composition, na.rm = TRUE), .groups = "drop") %>%
+  
+  # Make compound names columns
+  pivot_wider(names_from = Compound_Name, values_from = Composition,
+    values_fill = 0) %>%
+  column_to_rownames("Sample")
+
+##merging
+tab_vocs <- merge(metadata2, vocs_names, by =0) 
+
+##remove plant samples 
+
+tab_vocs <- tab_vocs %>% filter(sample_type != "Plants")
+
+#output_path <- file.path(wd$output, "ona_merged.csv")
+
+#write.csv(tab_vocs, file = output_path, row.names = TRUE)
+
+```
+
+Data Analysis: 
+
+# Non Metrical Dimensional Scaling (NDMS) 
+
+To see the ordination of the samples spatially depending of similarity 
+
+```{r}
+names(tab_vocs)
+mynmds <- metaMDS(tab_vocs[,c(20:56)], trace = FALSE,  k = 3, trymax = 100)
+plot(mynmds)
+
+### Extract NMDS site scores
+nmds_sites <- as.data.frame(scores(mynmds, display = "sites"))
+
+###Add metadata
+nmds_sites$Rhino <- tab_vocs$rhino
+nmds_sites$ID <-tab_vocs$Row.names
+nmds_sites$Sex <-tab_vocs$rhino_sex
+nmds_sites$Age <-tab_vocs$rhino_age
+nmds_sites$Age <-factor(nmds_sites$Age, levels = c("4","5","6","8"))
+nmds_sites$Rhino <- factor(nmds_sites$Rhino, levels = c( "Billie", "FatAmy", "Joko", "Mafukuzela",
+                             "Mpilo", "Mshanelo", "Ndlebe", "Nsele","Qaphela", "Somiso", "TheRock"))
+
+#### Extract species scores
+nmds_species <- as.data.frame(scores(mynmds, display = "species"))
+
+ggplot(nmds_sites, aes(x = NMDS1, y = NMDS2, label = Rhino)) +
+ geom_point(size = 3, color = "blue") +
+ geom_text(vjust = -1, size = 5) +
+  geom_text(data = nmds_sites, aes(x = NMDS1, y = NMDS2, label = ID), color = "red", size = 4) +
+  theme_minimal() +
+  labs(x = "NMDS Axis 1", y = "NMDS Axis 2") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#### check where are the outliers
+which(tab_vocs$Row.names =="ThMs3")
+which(tab_vocs$Row.names =="MpTh17")
+which(tab_vocs$Row.names =="Jo7")
+
+##Create palette
+my_colors1 <- c("#a51c1c", "#f7ab47", "#fff743", "#00f570", "#0a9341", "#a7ffe2", "#1de8f5", "#0151ca", "#5f01ca", "#f03ad3", "#f51d64")
+
+my_colors <- c( "#a51c1c", "#ffe911", "#a845d3", "#0151cb","#F18F01", "#1a9cd7","#7F5539" ,"#00f580", "#F15BB5", "#1B334B", "#6A994E")
+
+#NMDS sorted by Rhino name (without outliers) 
+ggplot(nmds_sites [-c(297, 138),], aes(x = NMDS1, y = NMDS2, color = Rhino)) +
+  geom_point(size = 2, alpha = 0.7) +  
+  stat_ellipse(geom = "polygon",
+               aes(fill = Rhino), level = 0.7, 
+               alpha = 0.15, color = NA)+
+  scale_color_manual(values = my_colors) +
+  scale_fill_manual(values = my_colors) + 
+  theme_classic() +  labs(x = "NMDS Axis 1", y = "NMDS Axis 2", fill = "Rhino ID", color = "Rhino ID") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# 3D plot (to visuaise in 3d space)
+plot_ly(nmds_sites[-c(297, 138),], 
+        x = ~NMDS1, y = ~NMDS2, z = ~NMDS3,  
+        color = ~Rhino,  colors = my_colors,  
+        type = "scatter3d", mode = "markers", 
+        marker = list(size = 5, opacity = 0.7)) %>%
+  layout(title = "3D NMDS Plot for VOCs Black Rhino Dung",
+         scene = list(xaxis = list(title = "NMDS Axis 1"),
+           yaxis = list(title = "NMDS Axis 2"), zaxis = list(title = "NMDS Axis 3")))
+
+
+```
+# Plot by sex 
+
+```{r}
+ggplot(nmds_sites [-c(297, 138),], aes(x = NMDS1, y = NMDS2, color = Sex)) +
+  geom_point(size = 2, alpha = 0.6) +  
+  stat_ellipse(geom = "polygon",  aes(fill = Sex),  alpha = 0.2, color = NA, level = 0.95)+
+  scale_color_manual(values = my_colors1) +
+  scale_fill_manual(values = my_colors1) + 
+  labs( x = "NMDS Axis 1", y = "NMDS Axis 2", fill = "Rhino Sex", color = "Rhino Sex") +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+
+```
+#Plot by age
+
+```{r}
+
+ggplot(nmds_sites [-c(297, 138),], aes(x = NMDS1, y = NMDS2, color = Age)) +
+  geom_point(size = 2, alpha = 0.8) +  
+  stat_ellipse(geom = "polygon",
+               aes(fill = Age), 
+               alpha = 0.15, color = NA)+
+  scale_color_manual(values = c ("#75E0EB", "#4C55AE", "#BB35C5", "#F96783")) +
+  scale_fill_manual(values = c ("#75E0EB", "#4C55AE","#BB35C5","#F96783" )) + 
+  labs( x = "NMDS Axis 1", y = "NMDS Axis 2", fill = "Rhino Age", color = "Rhino Age") +
+   theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11))
+
+
+```
+
+# Most abundant VOCs 
+
+To know the distribution of the volatile molecules found in the samples
+
+
+```{r}
+
+#volatile abundance across all samples
+
+volatiles <- colSums(tab_vocs[, c(20:56)], na.rm = TRUE)
+
+compound_function<-read.csv(paste0(wd$data,  "voc_functionalgroups.csv"), h=T,  sep=";",  na.strings = "NA", stringsAsFactors=FALSE)
+
+# to set as dataframe
+volatile_df <- data.frame( compound_names = names(volatiles),  Abundance = volatiles)
+
+volatile_info <- merge(volatile_df, compound_function, by = "compound_names", all.x= TRUE)
+
+
+# Abundance of compounds colored by functional group 
+ggplot(volatile_info[1:37,], aes(x = reorder(compound_names, -Abundance), y = Abundance, fill = Functional_group)) +  geom_bar(stat = "identity") +
+  labs( x = "VOCs", y = "Total Abundance" ) +
+  theme_classic() + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+# grouped by functional group 
+abundance_functional <- volatile_info %>%
+  group_by(Functional_group) %>%
+  summarise(Total_Abundance = sum(Abundance, na.rm = TRUE))
+
+ggplot(abundance_functional, aes(x = Total_Abundance, y = reorder(Functional_group, Total_Abundance), fill = Functional_group)) +
+  geom_bar(stat = "identity") + labs( x = "Total Abundance",
+    y = " Functional Groups" ) +  scale_fill_brewer(palette = "Set3") +
+  theme_classic() +   theme(axis.title.y = element_blank()) + theme (legend.position = "none")
+
+
+```
+# Variability of each rhino profile 
+
+To visualise the variance for each rhinoceros chemical profile 
+
+```{r}
+##### with all samples for one rhino
+
+billie_voc_long <- tab_vocs %>%
+  filter(rhino == "Billie") %>%  
+  select(Row.names, 20:56) %>%  
+  pivot_longer(cols = -Row.names, names_to = "VOCs", values_to = "Abundance")
+
+billie_voc_long$Row.names <- as.factor(billie_voc_long$Row.names)
+
+## Plot with separate plots per sample
+ggplot(billie_voc_long, aes(x = as.factor(VOCs), y = Abundance, fill = Row.names)) + geom_bar(stat = "identity") +
+  facet_wrap(~ Row.names, scales = "free_y") +  
+  labs( x = "VOCs", y = "Abundance") +
+  theme_minimal() + theme(    axis.text.x = element_blank(), 
+    legend.position = "none") + scale_fill_viridis(discrete=TRUE, option="A")
+
+#Plot for one sample 
+billie_one_sample <- tab_vocs %>%
+  filter(rhino == "Billie", Row.names == "Bi9") %>%
+  select(Row.names, 20:56) %>%
+  pivot_longer(cols = -Row.names, names_to = "compound_names", values_to = "Abundance")
+
+billie_merged <- merge(  billie_one_sample,  volatile_info[, c("compound_names", "Retention_time")],
+  by = "compound_names",  all.x = TRUE)
+
+ggplot(billie_merged, aes(x = Retention_time, y = Abundance)) +
+  geom_segment(aes(xend = Retention_time, yend = 0), 
+    linewidth = 0.3, color = "blue") +
+  labs(x = "Retention time (min)", y = "Abundance") +  theme_classic()
+```
+
+#  PERMANOVA analysis!!!! 
+
+To assess which variables (identity, sex, age, etc..) explain the most the variation in VOCs composition among the samples!
+
+```{r}
+fit<-adonis2(tab_vocs[,c(20:56)]~rhino, data= tab_vocs, permutations = 999,method = "bray") 
+fit # Rhino ID very significant effect on all sample types !
+
+## now let's verify with permdist 
+
+dist_mat <- vegdist(tab_vocs[, 20:56], method = "bray")
+
+disp <- betadisper(dist_mat, tab_vocs$rhino)
+
+disp_test <- permutest(disp, permutations = 999)
+
+disp
+disp_test # not significant, so no differences in dispersion among rhino groups :) 
+
+```
+```{r}
+
+fit<-adonis2(tab_vocs[,c(20:56)]~rhino_sex, data= tab_vocs, permutations = 999,method = "bray") 
+fit # Rhino sex significant!! but not as much as ID
+
+## now let's verify with permdist 
+
+dist_mat <- vegdist(tab_vocs[, 20:56], method = "bray")
+
+disp <- betadisper(dist_mat, tab_vocs$rhino_sex)
+
+disp_test <- permutest(disp, permutations = 999)
+
+disp
+disp_test # not significant, so no differences in dispersion among rhino sex :) 
+
+```
+```{r}
+
+fit<-adonis2(tab_vocs[,c(20:56)]~rhino_age, data= tab_vocs, permutations = 999,method = "bray") 
+fit # also significant but small effect
+
+## now let's verify with permdist 
+
+dist_mat <- vegdist(tab_vocs[, 20:56], method = "bray")
+
+disp <- betadisper(dist_mat, tab_vocs$rhino_age)
+
+disp_test <- permutest(disp, permutations = 999)
+
+
+disp
+disp_test #  not significant!!
+
+```
+```{r}
+fit<-adonis2(tab_vocs[,c(20:56)]~sample_type, data= tab_vocs, permutations = 999,method = "bray") 
+fit # Rhino ID has a verY significant effect on VOC composition! and sample type, and the two combined vary between the different rhinoceros 
+
+
+
+```
+
+# PERMANOVA for each rhino separately to see the intersection effect of ID and the sample type 
+
+Using the Bray-Curtis dissimilarity, to see how sample type (so experiment vs baseline) affects variance in the VOCs composition in the samples from each rhino. So if sample type has an effect on the variance of their chemical profiles. 
+
+```{r}
+unique_rhinos <- unique(tab_vocs$rhino) # to create list of rhinos
+
+# permanova for each rhino separately
+results2 <- lapply(unique_rhinos, function(rhino_id) {
+  subset_data <- tab_vocs[tab_vocs$rhino == rhino_id, ]  
+  
+  if (nrow(subset_data) > 1) {  
+    fit <- adonis2(subset_data[, c(20:56)] ~ sample_type, 
+  data = subset_data, permutations = 999, method = "bray")
+    return(list(rhino = rhino_id, fit = fit))
+  } else {
+    return(list(rhino = rhino_id, fit = NULL))  
+  }
+})
+
+# Results per rhino
+for (res in results2) {
+  if (!is.null(res$fit)) {
+    print(paste("Rhino:", res$rhino))
+    print(res$fit)
+  } else {
+    print(paste("Rhino:", res$rhino, "- Not enough data for analysis"))
+  }
+}
+```
+
+So we can see that for all rhinos sample type has a significant effect on VOC variation, explaining between the 20-40% of the variance. So, sample type has a significant effect on VOC variance. 
+
+
+# Dispersion and PCoA
+
+To know which sample type has more variance 
+
+```{r}
+tab_vocs_filtered <- tab_vocs[tab_vocs$sample_type %in% c("Baseline", "Experiment"), ]
+
+bray_dist <- vegdist(tab_vocs_filtered[, 20:56], method = "bray") # dissimilarity between samples depending on VOC abundance 
+
+dispersion <- betadisper(bray_dist, tab_vocs_filtered$sample_type) # mean dispersion (variance) for sample_type 
+
+permutest(dispersion, permutations = 999) # to see if difference among sample type variances is significant -> yes it is!!!!! 
+
+
+# Plot! 
+pcoa_res <- cmdscale(bray_dist, eig = TRUE, k = 2)  
+
+# data frame 
+pcoa_df <- data.frame(
+  PC1 = pcoa_res$points[,1],
+  PC2 = pcoa_res$points[,2],
+  Sample_Type = tab_vocs_filtered$sample_type)
+
+#  % variance explained
+var_explained <- round(100 * pcoa_res$eig / sum(pcoa_res$eig), 1)
+
+#  PCoA
+ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Sample_Type, fill = Sample_Type)) +
+  geom_point(shape = 21, size = 2, alpha = 0.7) +
+  stat_ellipse(aes(group = Sample_Type), type = "t", alpha = 0.2, geom = "polygon", level = 0.95, color = NA) +
+  labs(    x = paste0("PCoA1 (", var_explained[1], "%)"),
+    y = paste0("PCoA2 (", var_explained[2], "%)") , fill = "Sample Type", color = "Sample Type" ) +
+  scale_color_manual(values = c("#4C78A8", "gold")) +
+  scale_fill_manual(values = c( "#4C78A8", "gold")) +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+#Boxplot graph 
+disp_df <- data.frame(  Sample_Type = tab_vocs_filtered$sample_type,
+  Dispersion = dispersion$distances)
+
+ggplot(disp_df, aes(x = Sample_Type, y = Dispersion, fill = Sample_Type)) +
+  geom_boxplot(alpha = 0.5, color = "grey40", outlier.shape = NA) +  
+  geom_jitter(width = 0.2, alpha = 0.6, aes(color = Sample_Type)) +  
+  labs(    x = NULL,    y = "Variance (Dispersion)") +
+  scale_fill_manual(values = c("#4C78A8", "gold")) +  
+  scale_color_manual(values = c("#4C78A8", "gold")) + 
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) + theme(legend.position = "none") 
+
+
+```
+
+# ALPHA DIVERSITY within rhino between experiment and baseline (sample types) 
+
+So we can see if the experiment affects on the diversity of VOCs that can be found in the dung of each rhinoceros 
+
+
+```{r}
+tab_vocs$shannon_diversity <- diversity(tab_vocs[, 20:56], index = "shannon") # shannon diversity index
+tab_vocs_filtered$shannon_diversity <- diversity(tab_vocs_filtered[, 20:56], index = "shannon") # shannon diversity index
+
+#wilcoxon paired tests with shannon, richness and evenness
+
+tab_vocs_filtered <- tab_vocs_filtered %>%
+  mutate(    richness = specnumber(tab_vocs_filtered[, 20:56]),
+    evenness = shannon_diversity / log(richness))
+
+avg_metrics <- tab_vocs_filtered %>% group_by(rhino, sample_type) %>%
+  summarise(    mean_richness = mean(richness),
+    mean_evenness = mean(evenness),
+    mean_shannon = mean(shannon_diversity),.groups = "drop")
+
+wide_richness <- avg_metrics %>%
+  select(rhino, sample_type, mean_richness) %>%
+  pivot_wider(names_from = sample_type, values_from = mean_richness)
+
+wide_evenness <- avg_metrics %>%
+  select(rhino, sample_type, mean_evenness) %>%
+  pivot_wider(names_from = sample_type, values_from = mean_evenness)
+
+wide_shannon <- avg_metrics %>%
+  select(rhino, sample_type, mean_shannon) %>%
+  pivot_wider(names_from = sample_type, values_from = mean_shannon)
+
+wilcox_richness <- wilcox.test(wide_richness$Baseline, wide_richness$Experiment, paired = TRUE)
+wilcox_evenness <- wilcox.test(wide_evenness$Baseline, wide_evenness$Experiment, paired = TRUE)
+wilcox_shannon <- wilcox.test(wide_shannon$Baseline, wide_shannon$Experiment, paired = TRUE)
+
+wilcox_richness #Significant decrease in the number of VOCs during the experiment
+wilcox_evenness #non Significant decrease in how evenly VOCs are distributed -> some compounds dominate more during the experiment
+wilcox_shannon # Significant decrease overall in alpha diversity, combining richness & evenness.
+
+
+```
+
+# Plot Shannon Diversity Index per day per Rhinoceros 
+
+To see diversity over time and also visualize the effect of the experiment with the separated individuals
+
+
+```{r}
+sampled_days <- tab_vocs %>%
+  filter(!is.na(shannon_diversity))
+
+#Shannon Diversity index over time for each rhinoceros
+
+tab_vocs$rhino_ordered <- fct_reorder(tab_vocs$rhino, tab_vocs$shannon_diversity)
+
+ggplot(tab_vocs, aes(  x = date2,  y = rhino_ordered,   height = shannon_diversity / 2,
+  group = rhino_ordered,   scale = 4,   fill = rhino_ordered)) +
+  geom_ridgeline(    alpha = 0.3, scale = 2.5,  color = "white") +
+  xlim(as.Date("2024-07-12"), as.Date("2024-08-25")) +  # Proper date format
+  labs(  y = "Shannon diversity index", x = "Date", fill = "Rhino ID"  ) +
+  geom_vline(xintercept = as.Date("2024-07-31"), color = "white", size = 0.5) +
+  geom_vline(xintercept = as.Date("2024-08-17"), color = "white", size = 0.5) +
+    scale_fill_manual(values = c("#a51c1c", "#F15BB5",  "#6A994E", "#a845d3", "#7F5539", "#1a9cd7","#0151cb","#1B334B",  "#F18F01", "#ffe911","#00f580")) +
+   theme_classic() +  theme(axis.text.y = element_blank()) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) + theme(axis.ticks.y = element_blank())
+
+
+
+```
+#compute variance coefficient 
+
+```{r}
+cv_by_rhino <- tab_vocs_filtered %>%
+  group_by(rhino, sample_type ) %>%   
+  summarise(    mean_shannon = mean(shannon_diversity, na.rm = TRUE),
+    sd_shannon   = sd(shannon_diversity, na.rm = TRUE),
+    cv_shannon   = sd_shannon / mean_shannon,
+    n = n(), .groups = "drop")
+
+cv_by_rhino #table 
+
+#plot 
+ggplot(cv_by_rhino,  aes(x = sample_type, y = cv_shannon, group = rhino, color = rhino)) +
+  geom_point(size = 2.4, alpha = 0.7) +  geom_line(size= 0.4, alpha = 0.5) +
+  scale_color_manual(values = my_colors) +
+  labs(x = "Sample Type",
+       y = "Coefficient of Variation (Shannon)", color = "Rhino ID" ) +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11))
+
+
+#to make new graph 
+
+cv_change <- cv_by_rhino %>%
+  select(rhino, sample_type, cv_shannon) %>%
+  pivot_wider(names_from = sample_type, values_from = cv_shannon) %>%
+  mutate(delta_cv = Experiment - Baseline)
+
+
+ggplot(cv_change, aes(y = rhino, x = delta_cv, fill = rhino)) +
+  geom_col(width = 0.6, alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
+  scale_fill_manual(values = c("#a51c1c", "#ffe911", "#a845d3", "#0151cb","#F18F01", "#1a9cd7","#7F5539" ,"#00f580", "#F15BB5", "#1B334B", "#6A994E")) +
+  labs(    y = NULL,    x = "Δ CV (Experiment − Baseline)",
+    fill = "Rhino ID") +
+  theme_classic() +
+  theme(axis.text.y.right  = element_text(size = 9 ), axis.ticks.y = element_blank(), axis.title.x = element_text(size = 11 ), axis.title.y = element_text(size = 11 ), legend.position = "none")
+
+
+
+```
+
+#Variance within the experiment 
+
+Check which variables are the ones affecting on the VOC variance during the experiment (rhino sex, pairing sex, dung sex )
+
+```{r}
+experiment_data <- tab_vocs[tab_vocs$sample_type == "Experiment", ]
+experiment_data <- experiment_data[experiment_data$rhino_sex != "", ]
+experiment_data$rhino_sex <- droplevels(experiment_data$rhino_sex)
+
+#output_path <- file.path(wd$output, "experiment_data.csv")
+#write.csv(experiment_data, file = output_path, row.names = TRUE)
+
+experiment_data2 <- read.csv(paste0(wd$data, "experiment_withpairingday.csv"), h=T,  sep=";",  na.strings = "NA", stringsAsFactors=FALSE)
+
+experiment_data$pairing_day <- experiment_data2$pairing_day[
+  match(experiment_data$short_id, experiment_data2$short_id)]
+
+#permanova 
+
+fit <- adonis2(experiment_data[, c(20:56)] ~ pairing_sex, data = experiment_data, 
+               permutations = 999,  method = "bray", strata = experiment_data$rhino)
+fit # pairing sex not significant once its restricted to include rhinos identity
+
+fit <- adonis2(experiment_data[, c(20:56)] ~ day_exp, data= experiment_data, 
+               permutations = 999,  method = "bray", strata = experiment_data$rhino)
+fit # significant! should check pairing day 
+
+fit <- adonis2(experiment_data[, c(20:56)] ~ pairing_day*dung_rhino, data= experiment_data, 
+               permutations = 999,  method = "bray", strata = experiment_data$rhino , by ="terms")
+fit # not significant
+
+fit <- adonis2(experiment_data[, c(20:56)] ~ pairing_id, data = experiment_data, 
+               permutations = 999,  method = "bray")
+fit #significant!!! very important actually bc it means each rhino has a significantly different profile depending of who it's smelling, more than sex or other things ! biig effect also
+
+
+fit <- adonis2(experiment_data[, c(20:56)] ~ rhino, data = experiment_data, 
+               permutations = 999,  method = "bray", strata = experiment_data$rhino_sex)
+fit # quite significant! -z rhinos have different profiles independent of sex
+
+
+adonis_summary <- as.data.frame(fit)%>% rownames_to_column("Factor") %>%
+  rename(     Df = Df,     SumOfSqs = SumOfSqs,
+    R2 = R2, Fvalue = F, Pvalue = `Pr(>F)` ) %>%
+  mutate(Significance = case_when(Pvalue <= 0.001 ~ "***",  Pvalue <= 0.01  ~ "**", Pvalue <= 0.05  ~ "*",
+    Pvalue <= 0.1   ~ ".", TRUE            ~ ""))
+
+adonis_summary
+```
+Can I visualise it? 
+
+```{r}
+mynmds2 <- metaMDS(experiment_data[,c(20:56)], trace = FALSE,  k = 3, trymax = 100)
+plot(mynmds2)
+
+# Extract NMDS site scores
+nmds_sites2 <- as.data.frame(scores(mynmds2, display = "sites"))
+
+#Add metadata
+nmds_sites2$pairing_sex <- experiment_data$pairing_sex
+nmds_sites2$pairing_id <-experiment_data$pairing_id
+nmds_sites2$short_id <-experiment_data$short_id
+#NMDS of the sex pairing 
+
+ggplot(nmds_sites2, aes(x = NMDS1, y = NMDS2, label = pairing_sex)) +
+ geom_point(size = 3, color = "blue") +
+ geom_text(vjust = -1, size = 5) +
+  geom_text(data = nmds_sites2, aes(x = NMDS1, y = NMDS2, label = short_id), color = "red", size = 4) +
+  theme_minimal() +
+  labs( x = "NMDS Axis 1", y = "NMDS Axis 2") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+which(experiment_data$Row.names =="ThMs3")
+which(experiment_data$Row.names =="MpTh17")
+
+ggplot(nmds_sites2[-c(189, 88),], aes(x = NMDS1, y = NMDS2, color = pairing_sex)) +
+  geom_point(size = 2, alpha = 0.8) +  # Plot points
+  stat_ellipse(geom = "polygon",
+               aes(fill = pairing_sex), 
+               alpha = 0.15, color = NA ) +
+  scale_color_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) +
+  scale_fill_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) + 
+   labs(x = "NMDS Axis 1", y = "NMDS Axis 2", fill = "Sex Pairing", color = "Sex Pairing") +
+  theme(plot.title = element_text(hjust = 0.5)) + theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+
+```
+
+
+
+```{r}
+mexp_data <- experiment_data[experiment_data$rhino_sex == "m", ]
+fexp_data <- experiment_data[experiment_data$rhino_sex == "f", ]
+
+# compute distances 
+dist_m <- vegdist(mexp_data[, 20:56], method = "bray")
+dist_f <- vegdist(fexp_data[, 20:56], method = "bray")
+
+#calculate dispersion (permdisp) by pairing sex
+
+disp_m <- betadisper(dist_m, mexp_data$pairing_sex)
+disp_f <- betadisper(dist_f, fexp_data$pairing_sex)
+
+
+# Overall test for differences in dispersion
+anova(disp_m) #significative for males, so one of the pairing_sex causes different variability in VOCs
+anova(disp_f) # not significative for females
+
+# Post-hoc pairwise comparisons 
+permutest(disp_m, pairwise = TRUE, permutations = 999) #male rhinos more variable when exposed to female dung
+
+
+```
+
+# visualisation of voc variation depending of sex pairing
+
+
+```{r}
+
+m_beta <- data.frame(  distance_to_centroid = disp_m$distances,
+  pairing_sex = mexp_data$pairing_sex, rhino = mexp_data$rhino)
+
+f_beta <- data.frame(  distance_to_centroid = disp_f$distances,
+  pairing_sex = fexp_data$pairing_sex, rhino = fexp_data$rhino)
+
+
+#Graph of Beta Diversity (Variability) of VOCs in Males
+ggplot(m_beta, aes(x = pairing_sex, y = distance_to_centroid, fill = rhino)) +
+  geom_boxplot(alpha = 0.5, color = "grey30", outlier.shape = NA)  +
+  scale_fill_manual(values = c("#F18F01", "#1a9cd7","#00f580", "#1B334B", "#6A994E")) +
+  labs(       x = "Sex Pairing",
+       y = "Distance to Group Centroid (Bray-Curtis)", fill = "Male Rhinos") +  
+   theme ( panel.grid.major.x = element_blank(), panel.grid.minor.y = element_blank() ) + 
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 0))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+#Graph of Beta diversity (variabiliy) of VOCs in females 
+
+ggplot(f_beta, aes(x = pairing_sex, y = distance_to_centroid, fill = rhino)) +
+  geom_boxplot(alpha = 0.5, color = "grey30", outlier.shape = NA) +
+  scale_fill_manual(values = c ("#a51c1c", "#ffe911", "#a845d3", "#0151cb", "#7F5539", "#F15BB5")) +  
+  labs(    x = "Sex Pairing",
+    y = "Distance to Group Centroid (Bray–Curtis)", fill = "Female Rhinos") +   
+ theme ( panel.grid.major.x = element_blank(), panel.grid.minor.y = element_blank() ) + 
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 0))  +  theme(axis.text = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+
+```
+
+####  RandomForest 
+
+To establish links between specific volatiles and individual characteristics, and check which volatiles can be predictors of them 
+
+```{r}
+
+baseline_data <- tab_vocs %>%
+  filter(sample_type == "Baseline") %>%
+  mutate(rhino_sex = droplevels(rhino_sex))
+
+# rhino_sex and quantification columns
+rf_data <- baseline_data %>%
+dplyr::select(rhino_sex, 20:56) %>%
+  na.omit()
+
+names(rf_data) <- make.names(names(rf_data), unique = TRUE)
+
+# Fit Random Forest to the train data set
+set.seed(123)  # Setting seed
+classifier_RF = randomForest(rhino_sex ~ .,
+  data = rf_data,
+  ntree = 1000,
+  importance = TRUE)
+
+print (classifier_RF)
+
+# Plotting Error Rate
+plot(classifier_RF, main = "Random Forest Error Rate") 
+
+# Importance plot
+imp<- importance(classifier_RF)
+imp <- as.data.frame(imp)
+imp <- tibble::rownames_to_column(imp, "Volatiles")
+
+# Sort by MeanDecreaseGini
+imp_sorted <- imp[order(imp$MeanDecreaseGini,decreasing=TRUE),]
+
+# Variable importance plot
+varImpPlot(classifier_RF)
+
+
+
+```
+
+# RF Permute
+One more randomforest run to check the statistical significance of the model and the predictor variable
+```{r}
+
+set.seed(123)
+rf_perm <- rfPermute(
+  rhino_sex ~ .,
+  data = rf_data,
+  ntree = 500,
+  num.rep = 100)
+
+rf_perm # to check model significance 
+
+rf_perm$pval #to see all the  p-values
+
+rf_perm$rf$importance
+
+
+
+```
+#Cross Validated Random forest 
+
+To know if there is too much noise from the VOCs and that is why the model is performing poorly, or to know if there are only no specific VOC that can help separate sexes we do a cross Validated Random Forest 
+
+
+
+```{r}
+#Cross Validated Random Forest  
+
+ctrl <- trainControl(  method = "repeatedcv",  number = 10,  repeats = 5)
+
+set.seed(123)
+
+rf_cv <- train(  rhino_sex ~ .,  data = rf_data,  method = "rf",  trControl = ctrl,  tuneLength = 10)
+
+rf_cv #to check model accuracy -> seems accurate for sex! 
+
+
+###VOCs with significant permutation importance
+
+# Extract p-values from rfPermute
+pvals<- rf_perm$pval[, , "unscaled"]
+
+# Select variables with p < 0.05 for either class
+sig_vars <- rownames(pvals)[apply(pvals, 1, function(x) any(x < 0.05))]
+
+sig_vars
+
+#dataset with significant VOCs 
+rf_sig <- rf_data[, c("rhino_sex", sig_vars)]
+
+```
+
+#Importance plot + significance plot 
+
+most important compounds for discrimination (according to what class (sex/age) you selected above), its the same as the classifier plot above based on MeanDecreaseGini
+```{r}
+# top 10 VOCs
+top10_vocs <- imp_sorted[1:10, ]
+print(top10_vocs)
+
+# Top 10 VOCs by importance (mean decrease accuracy) for sex 
+
+ ggplot(top10_vocs, aes(x=reorder(Volatiles,MeanDecreaseAccuracy), y=MeanDecreaseAccuracy,fill=MeanDecreaseAccuracy))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Mean Decrease Accuracy")+
+      xlab("")+
+      guides(fill=F)+
+      scale_fill_gradient(low="grey", high="#27391C") +
+      theme_classic() 
+ 
+ 
+ #boxplots of top 5 significant volatiles: Male vs. Female
+
+ # first check significance !
+ 
+ rf_data$rhino <- rf_data2$rhino
+ 
+fit <- glm(rf_data$X1.7.Dimethyl.4..1.methylethyl.cyclodecane ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit) # significant for both rhino sex (**) & individuality (***)
+
+fit <- glm(rf_data$Tridecane ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit) #significant for rhino (***) but not for rhino sex 
+
+fit <- glm(rf_data$Decane..2.6.6.trimethyl. ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit)  #significant for rhino (***) but not for rhino sex 
+
+fit <- glm(rf_data$X.6.Methyl.2.heptanone ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit)# significant for both rhino sex (***) & individuality (**)
+
+fit <- glm(rf_data$Dodecane ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit) #significant for rhino (***) but not for rhino sex 
+
+fit <- glm(rf_data$Nonadecane ~ rhino_sex + rhino , family = quasipoisson, data = rf_data)
+car::Anova(fit)
+anova(fit) # significant for both rhino sex (***) & individuality (**)
+
+#plot
+
+d<- ggplot(rf_data, aes(x=rhino_sex, y = `X.6.Methyl.2.heptanone`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(      y = "Relative abundance"  ) +
+    theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "***",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$X.6.Methyl.2.heptanone)*0.95  ,  textsize = 3.5)
+
+a<- ggplot(rf_data, aes(x=rhino_sex, y=	`X1.7.Dimethyl.4..1.methylethyl.cyclodecane`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) + 
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(    y = "Relative abundance"  ) +
+     theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "**",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$X1.7.Dimethyl.4..1.methylethyl.cyclodecane) *0.95 ,  textsize = 3.5)
+
+e<- ggplot(rf_data, aes(x=rhino_sex, y=`Dodecane`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(    y = "Relative abundance"  ) +
+   theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "ns",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$Dodecane) * 1.1,  textsize = 3.5)
+
+f <- ggplot(rf_data, aes(x=rhino_sex, y=`Nonadecane`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(    y = "Relative abundance"  ) +
+   theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "***",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$Nonadecane)*0.95 ,  textsize = 3.5)
+  
+b <- ggplot(rf_data, aes(x=rhino_sex, y=`Tridecane`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(     y = "Relative abundance"  ) +
+  theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "ns",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$Tridecane) * 1.1,  textsize = 3.5)
+
+c <- ggplot(rf_data, aes(x=rhino_sex, y=`Decane..2.6.6.trimethyl.`, fill = rhino_sex)) + 
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values=c("#a51c1c", "#f7ab47")) +
+  labs(     y = "Relative abundance"  ) +
+  theme_classic() + theme(axis.title.x = element_blank()) +  theme(legend.position = "none") +
+  geom_signif(  annotations = "ns",
+  xmin = 1, xmax = 2,  y_position = max(rf_data$Decane..2.6.6.trimethyl.) * 1.1,  textsize = 3.5)
+
+boxplotdryvol<-ggarrange(a, b, c, d, e, f,   labels = c("A", "B", "C", "D", "E", "F"), ncol = 3, nrow = 2, common.legend = F)
+ggarrange(a, b, c, d, e, f,   labels = c("A", "B", "C", "D", "E", "F"), ncol = 3, nrow = 2, common.legend = F)
+
+ 
+```
+And now for individuality 
+
+```{r}
+
+# Include rhino  and quantification columns
+rf_data2 <- baseline_data %>%
+dplyr::select(rhino, 20:56) %>%
+  na.omit()
+rf_data2$rhino <- droplevels(as.factor(rf_data2$rhino))
+names(rf_data2) <- make.names(names(rf_data2), unique = TRUE)
+
+### Fit Random Forest to the train data set
+set.seed(123)  
+
+classifier_RF = randomForest(rhino ~ .,
+  data = rf_data2,
+  ntree = 1000,
+  importance = TRUE)
+
+print (classifier_RF)
+
+# Plotting Error Rate
+plot(classifier_RF, main = "Random Forest Error Rate") 
+
+# Importance plot
+imp<- importance(classifier_RF)
+imp <- as.data.frame(imp)
+imp <- tibble::rownames_to_column(imp, "Volatiles")
+
+# Sort by MeanDecreaseGini
+imp_sorted <- imp[order(imp$MeanDecreaseGini,decreasing=TRUE),]
+
+# Variable importance plot
+varImpPlot(classifier_RF)
+
+#### RF permute 
+
+set.seed(123)
+rf_perm <- rfPermute(
+  rhino ~ .,
+  data = rf_data2,
+  ntree = 500,
+  num.rep = 100)
+
+rf_perm # to check model significance 
+
+rf_perm$pval #extract p-values
+
+
+ #### Cross validated model
+
+ctrl <- trainControl(  method = "repeatedcv",  number = 10,  repeats = 5)
+
+set.seed(123)
+
+rf_cv <- train(  rhino ~ .,  data = rf_data2,  method = "rf",  trControl = ctrl,  tuneLength = 10)
+
+rf_cv #to check model accuracy -> seems not super accurate 
+
+
+# Significant VOCs
+
+pvals <- rf_perm$pval[, , "unscaled"]
+
+# Select variables with p < 0.05 for either class
+sig_vars <- rownames(pvals)[apply(pvals, 1, function(x) any(x < 0.05))]
+
+sig_vars
+
+#dataset with only significant VOCs 
+rf_sig2 <- rf_data2[, c("rhino", sig_vars)]
+
+```
+
+Importance plot for individuality 
+
+```{r}
+# View top 10 VOCs
+top10_vocs2 <- imp_sorted[1:10, ]
+print(top10_vocs2)
+
+ ggplot(top10_vocs2, aes(x=reorder(Volatiles,MeanDecreaseAccuracy), y=MeanDecreaseAccuracy,fill=MeanDecreaseAccuracy))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Mean Decrease Accuracy")+
+      xlab("")+
+      guides(fill=F)+
+      scale_fill_gradient(low="grey", high="#27391C") +
+      theme_classic() 
+
+```
+#And Age  
+
+```{r}
+rf_data3 <- baseline_data %>%
+dplyr::select(rhino_age, 20:56) %>%
+  na.omit()
+rf_data3$rhino_age <- as.factor(rf_data3$rhino_age)
+names(rf_data3) <- make.names(names(rf_data3), unique = TRUE)
+
+### Fit Random Forest to the train data set
+set.seed(123)  
+
+classifier_RF = randomForest(rhino_age ~ .,
+  data = rf_data3,
+  ntree = 1000,
+  importance = TRUE)
+
+print (classifier_RF)
+
+# Plotting Error Rate
+plot(classifier_RF, main = "Random Forest Error Rate") 
+
+# Importance plot
+imp<- importance(classifier_RF)
+imp <- as.data.frame(imp)
+imp <- tibble::rownames_to_column(imp, "Volatiles")
+
+# Sort by MeanDecreaseGini
+imp_sorted <- imp[order(imp$MeanDecreaseGini,decreasing=TRUE),]
+
+# Variable importance plot
+varImpPlot(classifier_RF)
+
+#### RF permute 
+
+set.seed(123)
+rf_perm <- rfPermute(
+  rhino_age ~ .,
+  data = rf_data3,
+  ntree = 500,
+  num.rep = 100)
+
+rf_perm # to check model significance 
+
+rf_perm$pval #extract p-values
+
+
+ #### Cross validated model
+
+ctrl <- trainControl(  method = "repeatedcv",  number = 10,  repeats = 5)
+
+set.seed(123)
+
+rf_cv <- train(  rhino_age ~ .,  data = rf_data3,  method = "rf",  trControl = ctrl,  tuneLength = 10)
+
+rf_cv #to check model accuracy -> seems not super accurate 
+
+
+# Significant VOCs
+
+pvals <- rf_perm$pval[, , "unscaled"]
+
+# Select variables with p < 0.05 for either class
+sig_vars <- rownames(pvals)[apply(pvals, 1, function(x) any(x < 0.05))]
+
+sig_vars
+
+#dataset with only significant VOCs 
+rf_sig3 <- rf_data3[, c("rhino_age", sig_vars)]
+
+```
+
+plot  
+
+```{r}
+# View top 10 VOCs
+top10_vocs3 <- imp_sorted[1:10, ]
+print(top10_vocs3)
+
+ ggplot(top10_vocs3, aes(x=reorder(Volatiles,MeanDecreaseAccuracy), y=MeanDecreaseAccuracy,fill=MeanDecreaseAccuracy))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Mean Decrease Accuracy")+
+      xlab("")+
+      guides(fill=F)+
+      scale_fill_gradient(low="grey", high="#27391C") +
+      theme_classic() 
+
+```
+
