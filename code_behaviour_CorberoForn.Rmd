@@ -1,0 +1,321 @@
+---
+title: "Black Rhinoceros Behaviour Dung Presentation Experiment"
+author: "Ona Corberó Forn"
+date: "2026-05-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(car)
+library(emmeans)
+```
+# Behaviour Analysis of the dung experiment
+
+First let's read the file and set up time in seconds properly
+
+```{r}
+
+beh <- read.csv2(paste0(wd$data, "behav_rhinos.csv"))
+beh <- beh %>%  mutate(Time_sec = period_to_seconds(hms(Time))) # will say warning because not all lines have the time stamp, but it's okay actually 
+
+```
+
+## Sniffing frequency
+
+Let's visualise how much sniffing frequency varies between the sex of the dung deposited, the sex of the rhino smelling it, and the paring 
+
+
+```{r}
+
+str(beh) # need to factorize
+
+beh$Subject <- as.factor(beh$Subject)
+beh$Subject_sex <- as.factor(beh$Subject_sex )
+beh$Presentation_day <- as.factor(beh$Presentation_day)
+beh$Pairing_Day <- as.factor(beh$Pairing_Day)
+beh$Code <- as.factor(beh$Code)
+beh$Event <- as.factor(beh$Event)
+beh$Dungfrom <- as.factor(beh$Dungfrom )
+beh$Dung_sex <- as.factor(beh$Dung_sex   )
+beh$Pairing_sex  <- as.factor(beh$Pairing_sex )
+
+
+#Need to know the sniff count per subject etc 
+sniff_freq <- beh %>%
+  filter(Code == "Sniff") %>%
+  group_by(Subject, Dungfrom, Pairing_Day, Dung_sex, Pairing_sex, Subject_sex) %>%   
+  summarise(Sniff_Count = n(), .groups = "drop")
+
+fit <- glmer(  Sniff_Count ~ Pairing_sex + Pairing_Day + (1|Subject),
+  family = poisson, data = sniff_freq)
+Anova(fit) #not significant
+
+fit <- glmer(  Sniff_Count ~ Dungfrom + (1|Subject),
+  family = poisson, data = sniff_freq)
+Anova(fit) #significant!
+
+
+```
+Some graphs for SNIFFING FREQUENCY
+
+```{r}
+
+#Dung sex 
+a <-ggplot(sniff_freq, aes(x = Subject_sex, y = Sniff_Count, fill = Subject_sex)) +
+    geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("#a51c1c", "#f7ab47")) +
+  labs(    x = "Subject Sex",
+    y = "Sniffing Frequency" ) +
+  theme_classic()  +  theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9)) 
+
+#Pairing sex
+z <-ggplot(sniff_freq, aes(x = Pairing_sex, y = Sniff_Count, fill = Pairing_sex)) +
+   geom_boxplot( alpha = 0.7) +
+  scale_fill_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) +
+  labs(     x = "Pairing Sex",
+    y = "Sniffing Frequency"
+  ) +   theme_classic()  +  theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+#Individual variation
+j <-ggplot(sniff_freq, aes(y = Subject, x = Sniff_Count, fill = Subject)) +
+    geom_boxplot(width = 0.5, alpha = 0.6) +
+  scale_fill_manual(values = my_colors) +
+  labs(       y = "Rhino ",
+    x = "Sniff Frequency") +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) + theme(legend.position = "none") + xlim(0, 17)
+
+
+```
+
+
+#Sniffing duration
+
+Let's visualise how much sniffing time varies between the sex of the dung deposited, the sex of the rhino smelling it, and the sex paring 
+
+```{r}
+
+hist(beh$Time_sec) #lots of small numbers so poisson distribution 
+
+sniff <- subset(beh, Code == "Sniff")
+sniff$Code <- droplevels(sniff$Code)
+
+fit <- glmer(Time_sec~ Dungfrom  +  (1 | Subject), family = poisson,  data = sniff)
+Anova(fit) #very significant!
+
+fit <- glmer(Time_sec~ Pairing_sex + Pairing_Day  + (1 | Subject), family = poisson,  data = sniff)
+Anova(fit) # pairing sex significant as well as pairing day 
+
+#post-hoc for pairing day 
+emm_day <- emmeans(fit, ~ Pairing_Day)
+pairs(emm_day, adjust = "tukey")
+
+
+#post-hoc comparison for pairing sex
+emm <- emmeans(fit, ~ Pairing_sex)
+pairs(emm, adjust = "tukey") # so apparently there is no group that is significantly different from the others
+
+plot(emm)
+
+boxplot(Time_sec~ Pairing_sex , data = sniff)
+#males spend more time smelling dung coming from males, but NOT significant (individual variation!)
+
+boxplot(Time_sec~Subject, data = sniff) #BIG individual variation
+
+#to know individual variation (intercept)
+summary(fit)$varcor 
+
+
+```
+
+Some graphs for SNIFF DURATION
+
+```{r}
+
+# Dung sex and subject sex 
+
+b <- ggplot(sniff, aes(x = Subject_sex, y = Time_sec, fill = Subject_sex)) +
+   geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("#a51c1c", "#f7ab47")) +
+  labs(    x = "Subject Sex",
+    y = "Sniffing Duration (s)") +
+  theme_classic() +  theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+
+#Sex pairing 
+
+y <- ggplot(sniff, aes(x = Pairing_sex, y = Time_sec, fill = Pairing_sex)) +
+  geom_boxplot( alpha = 0.7) +
+  scale_fill_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) +
+  labs(       x = "Pairing Sex",
+    y = "Sniffing Duration (s)") +
+  theme_classic() + theme(legend.position = "none")+ theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+
+#Individual variation
+k <-ggplot(sniff, aes(y = Subject, x = Time_sec, fill = Subject)) +
+    geom_boxplot(width = 0.5, alpha = 0.6) +
+  scale_fill_manual(values = my_colors) +
+  labs(       y = "Rhino ",
+    x = "Sniff Duration (s)") +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) + theme(legend.position = "none") + xlim(0, 17)
+```
+
+graph on sniffing duration depending on day of the experiment per pairing 
+
+```{r}
+# Mean and standard error per day per pairing type
+sniff_summary <- sniff %>%
+  group_by(Pairing_Day, Subject) %>%
+  summarise(
+    mean_time = mean(Time_sec),
+    se_time = sd(Time_sec)/sqrt(n()),
+    .groups = "drop")
+
+# plot
+ggplot(sniff_summary, aes(x = Pairing_Day, y = mean_time, color = Subject, group = Subject)) +
+  geom_line(size = 0.7) +
+  geom_point(size = 1.7) +
+  labs(    x = "Pairing Day",
+    y = "Mean Sniff Duration (s)",
+    color = "Subject") +
+  theme_minimal(base_size = 14)
+
+
+#Mean times 
+ggplot(sniff, aes(x = Pairing_Day, y = Time_sec )) +
+  geom_line(data = sniff_summary, aes(x= Pairing_Day, y= mean_time, group = Subject, color = Subject), size = 0.8, alpha = 0.3) + scale_color_manual(values = my_colors) +
+  stat_summary(fun = mean, geom = "line", aes(group = 1),
+               color = "#4b1957", size = 1.2) +
+  stat_summary(fun = mean, geom = "point",
+               color = "#4b1957", size = 3) +
+  stat_summary(fun.data = mean_se, geom = "errorbar",
+               width = 0.1, color = "#4b1957") +
+   annotate("text", x = c(1, 2, 3), y = c( 5.7, 4.7, 4.8 ), 
+           label = c("a", "b", "b"),  color = "#4b1957", size = 5) +
+  scale_x_discrete(expand = c(0.1, 0.1)) + 
+  labs(x = "Presentation Day",
+       y = "Mean Sniff Duration (s)") +
+  theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+
+
+ggplot(sniff_summary, aes(x = Pairing_Day, y = mean_time, color = Subject, group = Subject)) +
+  geom_line(size = 0.8, alpha = 0.7) +
+  geom_ribbon(aes(ymin = mean_time - se_time, ymax = mean_time + se_time, fill = Subject),
+              alpha = 0.1, color = NA) +
+  scale_color_manual(values = my_colors) +
+  labs(    x = "Presentation Day",    y = "Mean Sniff Duration (s)",
+    color = "Focal Rhino",    fill = "Focal Rhino") +
+theme_classic() +  theme(axis.text.y = element_text(size = 10)) + theme(axis.title.x = element_text(size = 11))  + theme(axis.title.y = element_text(size = 11)) 
+```
+
+#Dung scraping
+
+```{r}
+
+scrap <- beh %>%
+  filter(Code == "Scrap") %>%
+  group_by( Subject, Pairing_sex, Pairing_Day, Subject_sex, Dungfrom) %>%   
+  summarise(Scrap_Count = n(), .groups = "drop")
+
+hist(scrap$Scrap_Count)
+
+fit <- glm(Scrap_Count ~ Dungfrom,
+            family = poisson(),
+            data = scrap)
+Anova(fit)# no significative
+anova(fit)
+
+fit <- glm(Scrap_Count ~ Pairing_sex,
+            family = poisson,
+            data = scrap)
+Anova(fit)# no significative
+
+
+```
+
+
+#Pooping on poop
+
+```{r}
+
+poop <- beh %>%
+  filter(Code == "Poop") %>%
+  group_by( Subject, Pairing_sex, Pairing_Day, Subject_sex, Dungfrom) %>%   
+  summarise(Poop_Count = n(), .groups = "drop")
+
+fit <- glmer(  Poop_Count ~ Dungfrom + (1|Subject),
+  family = poisson, data = poop)
+Anova(fit) #not significant
+
+#check if significant difference 
+fit <- glmer(  Poop_Count ~ Pairing_sex + Pairing_Day + (1|Subject),
+  family = poisson, data = poop)
+Anova(fit)# no significative
+
+
+```
+
+Graphs 
+
+```{r}
+
+c <- ggplot(poop, aes(x = Subject_sex, y = Poop_Count, fill = Subject_sex)) +
+    geom_boxplot(alpha = 0.7) +
+  labs(      x = "Rhino Sex",
+    y = "Countermarking Freq." ) +
+  scale_fill_manual(values = c("#a51c1c", "#f7ab47")) +
+  theme_classic() + theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+
+d <- ggplot(scrap, aes(x = Subject_sex, y = Scrap_Count, fill = Subject_sex)) +
+    geom_boxplot(alpha = 0.7) +
+  labs(      x = "Rhino Sex",
+    y = "Scrapping Frequency" ) +
+  scale_fill_manual(values = c("#a51c1c", "#f7ab47")) +
+  theme_classic() + theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+
+x <- ggplot(scrap, aes(x = Pairing_sex, y = Scrap_Count, fill = Pairing_sex)) +
+    geom_boxplot(alpha = 0.7) +
+  labs(    x = "Pairing Sex",
+    y = "Scrapping Frequency" ) +
+  scale_fill_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) +
+  theme_classic()  + theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+
+
+w <- ggplot(poop, aes(x = Pairing_sex, y = Poop_Count, fill = Pairing_sex)) +
+    geom_boxplot(alpha = 0.7) +
+  labs(    x = "Pairing Sex",
+    y = "Countermarking Freq." ) +
+  scale_fill_manual(values = c("#F0CC4A","#a7e940", "#2EB89A", "#6a6542")) +
+  theme_classic()  + theme(legend.position = "none") + theme(axis.text.y = element_text(size = 9)) + theme(axis.title.x = element_text(size = 10))  + theme(axis.title.y = element_text(size = 9)) + theme(axis.title.y = element_text(size = 9))
+```
+Okay now the merged graphs :) 
+
+```{r}
+# Subject sex 
+
+boxplotdryvol<-ggarrange(b, a, c, d,    labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2, common.legend = F)
+
+ggarrange(b, a, c,d,  labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2, common.legend = F)
+
+# Dung sex 
+
+
+# Sex pairing 
+boxplotdryvol<-ggarrange( y,z, w,x,    labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2, common.legend = F)
+
+ggarrange( y, z,  w, x,  labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2, common.legend = F)
+
+# Individual variation
+
+boxplotdryvol<-ggarrange(j,k,    labels = c("A", "B"), ncol = 2, nrow = 2, common.legend = F)
+
+ggarrange(j,k,  labels = c("A", "B"), ncol = 2, nrow = 2, common.legend = F)
+
+```
+
